@@ -1,0 +1,76 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv sync --all-extras --all-packages
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - run: uv run mypy
+
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          python-version: ${{ matrix.python-version }}
+      - run: uv sync --all-extras --all-packages
+      - run: uv run pytest -v
+
+  # The floors in pyproject.toml are a claim. This job tests it, so the claim
+  # cannot rot unnoticed. lowest-direct pins every direct dependency to the
+  # lowest version the specifier allows.
+  lowest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          python-version: "3.10"
+      - run: uv sync --all-extras --all-packages --resolution lowest-direct
+      - run: uv run pytest -v
+      - run: uv run mypy
+
+  integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker compose -f docker/docker-compose.yaml up -d
+      # PING answers before kronotop-ctl bootstrap runs, so wait for the
+      # bootstrap log line instead.
+      - name: Wait for the cluster
+        run: |
+          for i in $(seq 1 180); do
+            if docker compose -f docker/docker-compose.yaml logs kronotop | grep -q "Cluster bootstrapped successfully"; then
+              exit 0
+            fi
+            sleep 1
+          done
+          docker compose -f docker/docker-compose.yaml logs
+          exit 1
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv sync --all-extras --all-packages
+      - run: uv run pytest -v -m integration --kronotop-admin-host localhost:3320

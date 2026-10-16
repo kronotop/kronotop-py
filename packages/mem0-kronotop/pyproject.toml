@@ -1,0 +1,43 @@
+[project]
+name = "mem0-kronotop"
+version = "0.1.0"
+description = "Kronotop backend for mem0"
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+requires-python = ">=3.10"
+authors = [{ name = "Burak Sezer", email = "burak.sezer@kronotop.com" }]
+keywords = ["kronotop", "mem0", "memory", "database", "client"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Database :: Front-Ends",
+    "Typing :: Typed",
+]
+dependencies = [
+    "kronotop-py>=0.1.0",
+    "mem0ai>=2.2.0",
+]
+
+[project.urls]
+Homepage = "https://kronotop.com"
+Documentation = "https://github.com/kronotop/kronotop-py"
+Repository = "https://github.com/kronotop/kronotop-py"
+Issues = "https://github.com/kronotop/kronotop-py/issues"
+
+# Inside the workspace the dependency is the sibling source tree, not PyPI.
+[tool.uv.sources]
+kronotop-py = { workspace = true }
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mem0_kronotop"]

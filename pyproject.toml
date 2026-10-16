@@ -1,0 +1,95 @@
+[project]
+name = "kronotop-py"
+version = "0.1.0"
+description = "Python client for Kronotop"
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+requires-python = ">=3.10"
+authors = [{ name = "Burak Sezer", email = "burak.sezer@kronotop.com" }]
+keywords = ["kronotop", "resp", "foundationdb", "database", "client"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Database :: Front-Ends",
+    "Typing :: Typed",
+]
+# pymongo carries the bson package, the same BSON codec the server encodes
+# documents with. 4.2 is the first release that ships a py.typed marker and a
+# C extension that loads on arm64.
+dependencies = [
+    "redis>=8.1",
+    "pymongo==4.18.3",
+]
+
+[project.optional-dependencies]
+hiredis = ["redis[hiredis]>=8.1"]
+
+[project.urls]
+Homepage = "https://kronotop.com"
+Documentation = "https://github.com/kronotop/kronotop-py"
+Repository = "https://github.com/kronotop/kronotop-py"
+Issues = "https://github.com/kronotop/kronotop-py/issues"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.9",
+    "mypy>=1.14",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+# Every package under packages/ is a workspace member with its own PyPI
+# distribution. uv sync --all-packages installs them next to kronotop-py.
+[tool.uv.workspace]
+members = ["packages/*"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/kronotop"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 88
+src = ["src", "tests", "packages/mem0-kronotop/src"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "C4", "SIM", "RUF", "CPY"]
+
+[tool.ruff.lint.flake8-copyright]
+author = "Burak Sezer"
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+files = ["src", "packages/mem0-kronotop/src"]
+
+[[tool.mypy.overrides]]
+module = "tests.*"
+disallow_untyped_defs = false
+
+# bson imports numpy, and its stubs need Python 3.12 syntax.
+[[tool.mypy.overrides]]
+module = "numpy.*"
+follow_imports = "skip"
+follow_imports_for_stubs = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests", "packages/mem0-kronotop/tests"]
+# importlib mode lets tests/ and tests/test_asyncio/ share file names without
+# turning the test tree into a package.
+addopts = "--import-mode=importlib"
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+markers = [
+    "integration: requires a running Kronotop server",
+]

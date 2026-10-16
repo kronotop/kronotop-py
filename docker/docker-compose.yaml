@@ -1,0 +1,43 @@
+services:
+  foundationdb:
+    image: foundationdb/foundationdb:7.3.77
+    volumes:
+      - foundationdb-data-volume:/var/fdb
+    restart: on-failure
+    networks:
+      - kronotop
+    environment:
+      FDB_NETWORKING_MODE: container
+      FDB_COORDINATOR_PORT: 4500
+      FDB_PORT: 4500
+
+  kronotop:
+    image: ghcr.io/kronotop/kronotop:latest
+    volumes:
+      - kronotop-data-volume:/var/kronotop
+    restart: on-failure
+    stop_grace_period: 30s
+    depends_on:
+      - foundationdb
+    networks:
+      - kronotop
+    ports:
+      - "5484:5484/tcp"
+      - "3320:3320/tcp"
+    environment:
+      FDB_COORDINATOR: foundationdb
+      FDB_API_VERSION: 630
+      KRONOTOP_INIT_FDB: "1"
+      KRONOTOP_EXTERNAL_ADVERTISE: "127.0.0.1:5484,kronotop:5484"
+      KRONOTOP_INTERNAL_ADVERTISE: "kronotop:3320"
+      KRONOTOP_BOOTSTRAP: "--primary BUCKET kronotop:3320=0"
+      KRONOTOP_OPTS: "--sun-misc-unsafe-memory-access=allow --add-opens jdk.unsupported/sun.misc=ALL-UNNAMED --enable-native-access=ALL-UNNAMED --add-modules jdk.incubator.vector -D__test__.bucket_metadata_convergence.skip_wait_transaction_limit=true"
+    platform: "linux/amd64"
+
+networks:
+  kronotop:
+    name: kronotop
+
+volumes:
+  kronotop-data-volume:
+  foundationdb-data-volume:
