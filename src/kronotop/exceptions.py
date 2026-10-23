@@ -73,8 +73,8 @@ class ConfigurationError(KronotopError, ValueError):
 class NoCommonMemberError(KronotopError):
     """Raised when no member holds every bucket named in ``session_for``.
 
-    A session is one connection to one member, and a bucket command runs on a
-    member that owns one of the bucket's shards. Buckets with no such member
+    A session is one connection to one member, and a bucket command runs on
+    the primary of one of the bucket's shards. Buckets with no such member
     in common cannot share a session or a transaction.
 
     No command failed. The client read where each bucket lives and stopped
@@ -268,8 +268,9 @@ def _parse_reject(message: str) -> tuple[int | None, tuple[str, ...]]:
 class RejectError(KronotopCommandError):
     """Raised for server errors carrying the ``REJECT`` prefix.
 
-    A bucket command reached a member that owns none of the bucket's shards.
-    The message names the shard and every client address of the owner:
+    A bucket command reached a member that is not the primary of any of the
+    bucket's shards. A standby holds the data too, but it rejects the command.
+    The message names the shard and every client address of the primary:
     ``REJECT <shard_id> <host>:<port>, <host>:<port>``.
 
     The client does not follow the redirect, because a session is pinned to
@@ -282,7 +283,7 @@ class RejectError(KronotopCommandError):
 
     #: Shard the bucket's data lives on. ``None`` if the message was not parsed.
     shard_id: int | None
-    #: Every ``host:port`` of the owner, in the order the server sent them.
+    #: Every ``host:port`` of the primary, in the order the server sent them.
     #: Pass one to ``bootstrap``. Empty if the message was not parsed.
     addresses: tuple[str, ...]
     #: Host of the first address, which is the preferred one.

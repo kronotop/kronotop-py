@@ -155,7 +155,8 @@ class Kronotop:
 
         ``host`` picks the member by name, one of :attr:`hosts`. Without it the
         member whose turn it is takes the session. A session stays on the
-        member it opened on.
+        member it opened on. A bucket command needs the primary of the
+        bucket's shard, see :meth:`session_for`.
 
         ```python
         with client.session() as s:
@@ -175,8 +176,9 @@ class Kronotop:
     ) -> Session:
         """Open a session on a member that holds every bucket named.
 
-        A bucket command has to reach a member that owns one of the bucket's
-        shards, or it raises :class:`~kronotop.exceptions.RejectError`. This
+        A bucket command has to reach the primary of one of the bucket's
+        shards. Any other member, a standby too, raises
+        :class:`~kronotop.exceptions.RejectError`. This
         reads where each bucket lives and picks a member that holds them all,
         so one transaction can work on any of them. ``buckets`` maps a
         namespace to the bucket names in it, and there is no ``host``.
