@@ -54,7 +54,7 @@ class Admin(AdminCommands):
         apply_defaults(kwargs)
         self._redis = redis.asyncio.Redis(host=hostname, port=port, **kwargs)
         register_callbacks(self._redis)
-        #: Volume commands, e.g. ``await admin.volume.describe("bucket-shard-0")``.
+        #: Volume commands, e.g. ``await admin.volume.describe("shard-0")``.
         self.volume = AsyncVolume(self)
 
     async def execute_command(self, *args: Any, **options: Any) -> Any:

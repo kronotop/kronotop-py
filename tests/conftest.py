@@ -24,7 +24,6 @@ import redis
 
 from kronotop import (
     DEFAULT_ADMIN_PORT,
-    DEFAULT_PORT,
     BarrierNotSatisfiedError,
     BucketBeingRemovedError,
     NamespaceBeingRemovedError,
@@ -34,7 +33,6 @@ from kronotop import (
     _members,
 )
 
-DEFAULT_URL = f"kronotop://localhost:{DEFAULT_PORT}"
 DEFAULT_ADMIN_HOST = f"localhost:{DEFAULT_ADMIN_PORT}"
 
 
@@ -59,11 +57,7 @@ def no_lookups(monkeypatch):
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
-    parser.addoption(
-        "--kronotop-url",
-        default=DEFAULT_URL,
-        help=f"Kronotop server to run integration tests against [{DEFAULT_URL}]",
-    )
+    # ``--kronotop-url`` is in the root ``conftest.py``, shared with the packages.
     parser.addoption(
         "--kronotop-admin-host",
         default=DEFAULT_ADMIN_HOST,

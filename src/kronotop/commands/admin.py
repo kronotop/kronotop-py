@@ -36,14 +36,13 @@ __all__ = [
     "MemberStatus",
     "ShardId",
     "ShardInfo",
-    "ShardKind",
     "ShardStatus",
     "TaskInfo",
 ]
 
 #: One shard: ``primary`` (a member id, or ``""`` when unassigned),
 #: ``standbys`` (member ids), ``status`` (a :data:`ShardStatus`) and
-#: ``linked_volumes`` (names such as ``bucket-shard-0``).
+#: ``linked_volume`` (the shard's volume name, such as ``shard-0``).
 ShardInfo = dict[str, Any]
 
 #: One member: ``status`` (a :data:`MemberStatus`), ``process_id``,
@@ -56,11 +55,7 @@ MemberInfo = dict[str, Any]
 #: ``started_at`` and ``last_run`` (``int``, UNIX seconds).
 TaskInfo = dict[str, Any]
 
-#: ``STASH`` is experimental and off by default. The server matches the value
-#: case insensitively.
-ShardKind = Literal["BUCKET", "STASH"]
-
-#: A zero-based shard index, or ``*`` for every shard of the kind in one
+#: A zero-based shard index, or ``*`` for every shard in one
 #: transaction, so one shard that fails a check rolls the whole call back.
 ShardId = int | Literal["*"]
 
@@ -94,20 +89,25 @@ class AdminCommands(CommandsBase):
         return self.execute_command("PING")
 
     @overload
-    def initialize_cluster(self: SyncClient) -> bool: ...
+    def initialize_cluster(self: SyncClient, shards: int | None = None) -> bool: ...
 
     @overload
-    def initialize_cluster(self: AsyncClient) -> Awaitable[bool]: ...
+    def initialize_cluster(
+        self: AsyncClient, shards: int | None = None
+    ) -> Awaitable[bool]: ...
 
-    def initialize_cluster(self) -> Any:
+    def initialize_cluster(self, shards: int | None = None) -> Any:
         """``KR.ADMIN INITIALIZE-CLUSTER``. Create the cluster metadata.
 
         Runs once per cluster, and is the only subcommand that works before
-        that. Every shard starts ``INOPERABLE`` with no route, so assign a
-        primary with :meth:`set_primary` and open the shards with
-        :meth:`set_shard_status`.
+        that. ``shards`` is the number of shards to create, one when left
+        out, with ids from ``0``. Every shard starts ``INOPERABLE`` with no
+        route, so assign a primary with :meth:`set_primary` and open the
+        shards with :meth:`set_shard_status`.
         """
-        return self._admin("INITIALIZE-CLUSTER")
+        if shards is None:
+            return self._admin("INITIALIZE-CLUSTER")
+        return self._admin("INITIALIZE-CLUSTER", "SHARDS", shards)
 
     @overload
     def describe_cluster(self: SyncClient) -> dict[str, Any]: ...
@@ -118,26 +118,39 @@ class AdminCommands(CommandsBase):
     def describe_cluster(self) -> Any:
         """``KR.ADMIN DESCRIBE-CLUSTER``. The whole topology.
 
-        ``metadata_version`` and ``cluster_name`` are ``str``. ``bucket`` maps
-        each shard id, an ``int``, to a :data:`ShardInfo`. ``stash`` is there
-        too when the stash subsystem is enabled.
+        ``metadata_version`` and ``cluster_name`` are ``str``. ``shards`` maps
+        each shard id, an ``int``, to a :data:`ShardInfo`.
         """
         return self._admin("DESCRIBE-CLUSTER")
 
     @overload
-    def describe_shard(
-        self: SyncClient, kind: ShardKind, shard_id: int
-    ) -> ShardInfo: ...
+    def add_shard(self: SyncClient) -> int: ...
 
     @overload
-    def describe_shard(
-        self: AsyncClient, kind: ShardKind, shard_id: int
-    ) -> Awaitable[ShardInfo]: ...
+    def add_shard(self: AsyncClient) -> Awaitable[int]: ...
 
-    def describe_shard(self, kind: ShardKind, shard_id: int) -> Any:
+    def add_shard(self) -> Any:
+        """``KR.ADMIN ADD-SHARD``. Add one shard and return its id.
+
+        The id is one higher than the last one the cluster assigned. The new
+        shard starts ``INOPERABLE`` with no route, so assign a primary with
+        :meth:`set_primary` and open it with :meth:`set_shard_status`. There
+        is no command to remove a shard. Of two calls at the same time, one
+        fails with ``Another shard is being added at the same time``, and
+        can be sent again.
+        """
+        return self._admin("ADD-SHARD")
+
+    @overload
+    def describe_shard(self: SyncClient, shard_id: int) -> ShardInfo: ...
+
+    @overload
+    def describe_shard(self: AsyncClient, shard_id: int) -> Awaitable[ShardInfo]: ...
+
+    def describe_shard(self, shard_id: int) -> Any:
         """``KR.ADMIN DESCRIBE-SHARD``. One shard, as :meth:`describe_cluster`
         lists it."""
-        return self._admin("DESCRIBE-SHARD", kind, shard_id)
+        return self._admin("DESCRIBE-SHARD", shard_id)
 
     @overload
     def describe_member(self: SyncClient) -> MemberInfo: ...
@@ -214,36 +227,32 @@ class AdminCommands(CommandsBase):
 
     @overload
     def set_shard_status(
-        self: SyncClient, kind: ShardKind, shard_id: ShardId, status: ShardStatus
+        self: SyncClient, shard_id: ShardId, status: ShardStatus
     ) -> bool: ...
 
     @overload
     def set_shard_status(
-        self: AsyncClient, kind: ShardKind, shard_id: ShardId, status: ShardStatus
+        self: AsyncClient, shard_id: ShardId, status: ShardStatus
     ) -> Awaitable[bool]: ...
 
-    def set_shard_status(
-        self, kind: ShardKind, shard_id: ShardId, status: ShardStatus
-    ) -> Any:
+    def set_shard_status(self, shard_id: ShardId, status: ShardStatus) -> Any:
         """``KR.ADMIN SET-SHARD-STATUS``. Open or close a shard.
 
         ``READWRITE`` takes reads and writes, ``READONLY`` refuses writes,
         ``INOPERABLE`` refuses everything. This is access control only, the
         routes and the volume are left alone.
         """
-        return self._admin("SET-SHARD-STATUS", kind, str(shard_id), status)
+        return self._admin("SET-SHARD-STATUS", str(shard_id), status)
+
+    @overload
+    def set_primary(self: SyncClient, shard_id: ShardId, member_id: str) -> bool: ...
 
     @overload
     def set_primary(
-        self: SyncClient, kind: ShardKind, shard_id: ShardId, member_id: str
-    ) -> bool: ...
-
-    @overload
-    def set_primary(
-        self: AsyncClient, kind: ShardKind, shard_id: ShardId, member_id: str
+        self: AsyncClient, shard_id: ShardId, member_id: str
     ) -> Awaitable[bool]: ...
 
-    def set_primary(self, kind: ShardKind, shard_id: ShardId, member_id: str) -> Any:
+    def set_primary(self, shard_id: ShardId, member_id: str) -> Any:
         """``KR.ADMIN ROUTE SET PRIMARY``. Make ``member_id`` own the shard.
 
         A shard with no primary takes the member as it is. Replacing a primary
@@ -251,39 +260,35 @@ class AdminCommands(CommandsBase):
         new member a standby that has caught up. The promoted standby leaves
         the standby set. The server refuses ``UNSET PRIMARY``.
         """
-        return self._admin("ROUTE", "SET", "PRIMARY", kind, str(shard_id), member_id)
+        return self._admin("ROUTE", "SET", "PRIMARY", str(shard_id), member_id)
+
+    @overload
+    def set_standby(self: SyncClient, shard_id: ShardId, member_id: str) -> bool: ...
 
     @overload
     def set_standby(
-        self: SyncClient, kind: ShardKind, shard_id: ShardId, member_id: str
-    ) -> bool: ...
-
-    @overload
-    def set_standby(
-        self: AsyncClient, kind: ShardKind, shard_id: ShardId, member_id: str
+        self: AsyncClient, shard_id: ShardId, member_id: str
     ) -> Awaitable[bool]: ...
 
-    def set_standby(self, kind: ShardKind, shard_id: ShardId, member_id: str) -> Any:
+    def set_standby(self, shard_id: ShardId, member_id: str) -> Any:
         """``KR.ADMIN ROUTE SET STANDBY``. Add ``member_id`` to the shard's standbys.
 
         The shard needs a primary first. The member must not be the primary or
         a standby already.
         """
-        return self._admin("ROUTE", "SET", "STANDBY", kind, str(shard_id), member_id)
+        return self._admin("ROUTE", "SET", "STANDBY", str(shard_id), member_id)
+
+    @overload
+    def unset_standby(self: SyncClient, shard_id: ShardId, member_id: str) -> bool: ...
 
     @overload
     def unset_standby(
-        self: SyncClient, kind: ShardKind, shard_id: ShardId, member_id: str
-    ) -> bool: ...
-
-    @overload
-    def unset_standby(
-        self: AsyncClient, kind: ShardKind, shard_id: ShardId, member_id: str
+        self: AsyncClient, shard_id: ShardId, member_id: str
     ) -> Awaitable[bool]: ...
 
-    def unset_standby(self, kind: ShardKind, shard_id: ShardId, member_id: str) -> Any:
+    def unset_standby(self, shard_id: ShardId, member_id: str) -> Any:
         """``KR.ADMIN ROUTE UNSET STANDBY``. Drop ``member_id`` from the standbys."""
-        return self._admin("ROUTE", "UNSET", "STANDBY", kind, str(shard_id), member_id)
+        return self._admin("ROUTE", "UNSET", "STANDBY", str(shard_id), member_id)
 
     @overload
     def remove_member(self: SyncClient, member_id: str) -> bool: ...
@@ -317,8 +322,9 @@ class AdminCommands(CommandsBase):
         Without ``token``, checks that ``name`` is the cluster this member runs
         and returns a token that lives 60 seconds. Asking again while it is
         pending returns the same token. With ``token``, removes the whole
-        cluster directory from FoundationDB. The token is used up by that
-        call, valid or not.
+        cluster directory from FoundationDB. A successful drop uses the token
+        up, and so does a call that finds it expired. A wrong token leaves the
+        pending one in place.
 
         Only the metadata goes: the volume files on disk stay, and the
         members that ran the cluster are left inconsistent, so stop them.

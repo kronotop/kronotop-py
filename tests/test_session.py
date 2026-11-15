@@ -485,7 +485,7 @@ def test_kill_transaction(kr, key):
 
 @pytest.mark.integration
 def test_kill_unknown_transaction(session):
-    with pytest.raises(TransactionError, match="no such transaction"):
+    with pytest.raises(TransactionError, match="No such transaction"):
         session.kill_transaction(2**63 - 1)
 
 

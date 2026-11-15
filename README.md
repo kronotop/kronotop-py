@@ -89,6 +89,16 @@ uv run pytest -m "not integration"   # never touches the network
 uv run pytest -m integration         # only the tests that need a server
 ```
 
+`uv run pytest` also runs the tests of the packages under `packages/`. Their
+dependencies, mem0 among them, are installed by `uv sync --all-packages`.
+Without them, pytest stops while it collects those tests. To run one tree
+alone:
+
+```bash
+uv run pytest tests                          # the client only
+uv run pytest packages/mem0-kronotop/tests   # mem0-kronotop only
+```
+
 Integration tests connect to `kronotop://localhost:5484`, and the `Admin`
 tests to the admin port of that member, `localhost:3320`. Use
 `--kronotop-url` and `--kronotop-admin-host` to point them somewhere else.

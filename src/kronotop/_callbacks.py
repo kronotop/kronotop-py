@@ -587,9 +587,8 @@ def _admin_map(fields: Any) -> dict[str, Any]:
 def _admin_cluster(response: Any) -> dict[str, Any]:
     """Decode ``DESCRIBE-CLUSTER``.
 
-    ``metadata_version`` and ``cluster_name`` are text. Every other key is a
-    shard kind, ``bucket`` or ``stash``, holding a map keyed by shard id, an
-    integer on both protocols.
+    ``metadata_version`` and ``cluster_name`` are text. ``shards`` holds a map
+    keyed by shard id, an integer on both protocols.
     """
     cluster: dict[str, Any] = {}
     for key, value in _as_dict(response).items():

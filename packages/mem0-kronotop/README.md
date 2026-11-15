@@ -93,6 +93,25 @@ memory.delete(found["results"][0]["id"])
 
 Kronotop has no full-text search, so mem0 ranks by vector similarity alone.
 
+## Tests
+
+The tests are in the [kronotop-py](https://github.com/kronotop/kronotop-py)
+repository, where this package is a uv workspace member. Run them from the
+repository root:
+
+```bash
+uv sync --all-packages
+uv run pytest packages/mem0-kronotop/tests
+```
+
+The store tests need a Kronotop at `kronotop://localhost:5484` and are skipped
+when none is running. The other tests need no server. `--kronotop-url` points
+them at another server:
+
+```bash
+uv run pytest packages/mem0-kronotop/tests --kronotop-url kronotop://192.168.1.10:5484
+```
+
 ## License
 
 Apache License 2.0. See [LICENSE](LICENSE).

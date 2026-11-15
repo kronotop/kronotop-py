@@ -505,7 +505,7 @@ async def test_get_d128_missing_key_returns_none(session):
 
 @pytest.mark.integration
 async def test_set_d128_rejects_a_string_that_is_not_a_decimal(session, key):
-    with pytest.raises(ResponseError, match="invalid decimal"):
+    with pytest.raises(ResponseError, match="Invalid decimal"):
         await session.zmap.set_d128(key, "notanumber")
 
 

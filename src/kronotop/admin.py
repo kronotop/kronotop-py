@@ -50,9 +50,9 @@ class Admin(AdminCommands):
     ``host`` is ``host`` or ``host:port``, default port ``3320``. The other
     keyword arguments are the ones :class:`kronotop.Kronotop` takes.
 
-    The internal listener has ``HELLO`` but no ``AUTH``. With
-    ``auth.requirepass`` on the server, pass ``protocol=3``, because
-    ``protocol=2`` sends the password as ``AUTH``.
+    The internal listener takes ``AUTH`` and ``HELLO`` like the external one,
+    so with ``auth.requirepass`` on the server, pass ``password`` on either
+    protocol.
 
     ```python
     with Admin("10.0.0.1") as admin:
@@ -68,7 +68,7 @@ class Admin(AdminCommands):
         apply_defaults(kwargs)
         self._redis = redis.Redis(host=hostname, port=port, **kwargs)
         register_callbacks(self._redis)
-        #: Volume commands, e.g. ``admin.volume.describe("bucket-shard-0")``.
+        #: Volume commands, e.g. ``admin.volume.describe("shard-0")``.
         self.volume = Volume(self)
 
     def execute_command(self, *args: Any, **options: Any) -> Any:

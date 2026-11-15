@@ -28,8 +28,8 @@ DIMENSIONS = 3
 
 @pytest.fixture
 def kronotop_url(request):
-    # ``tests/conftest.py`` of the client adds the option, and adding it here
-    # again fails when both trees run. Without that tree the default holds.
+    # The root ``conftest.py`` of the repository adds the option. The default
+    # holds when the tests run outside the repository.
     return request.config.getoption("--kronotop-url", default=DEFAULT_URL)
 
 

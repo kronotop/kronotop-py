@@ -30,7 +30,7 @@ from kronotop._callbacks import parse_kr_admin, parse_task_admin
 MEMBER = "006cdc459c59e600c76494e8388857fc3cba2fa8"
 STANDBY = "a3f18b2e74d9c5601f82e4a7b390d612c8f7e149"
 
-#: ``DESCRIBE-SHARD BUCKET 0`` as RESP2 hands it over: every map is an array.
+#: ``DESCRIBE-SHARD 0`` as RESP2 hands it over: every map is an array.
 SHARD_RESP2 = [
     b"primary",
     MEMBER.encode(),
@@ -38,8 +38,8 @@ SHARD_RESP2 = [
     [STANDBY.encode()],
     b"status",
     b"READWRITE",
-    b"linked_volumes",
-    [b"bucket-shard-0"],
+    b"linked_volume",
+    b"shard-0",
 ]
 
 #: The same on RESP3.
@@ -47,14 +47,14 @@ SHARD_RESP3 = {
     b"primary": MEMBER.encode(),
     b"standbys": [STANDBY.encode()],
     b"status": b"READWRITE",
-    b"linked_volumes": [b"bucket-shard-0"],
+    b"linked_volume": b"shard-0",
 }
 
 SHARD = {
     "primary": MEMBER,
     "standbys": [STANDBY],
     "status": "READWRITE",
-    "linked_volumes": ["bucket-shard-0"],
+    "linked_volume": "shard-0",
 }
 
 MEMBER_RESP2 = [
@@ -137,10 +137,16 @@ def sent(monkeypatch):
     ("call", "args", "phase"),
     [
         (lambda a: a.initialize_cluster(), ("INITIALIZE-CLUSTER",), None),
-        (lambda a: a.describe_cluster(), ("DESCRIBE-CLUSTER",), None),
         (
-            lambda a: a.describe_shard("BUCKET", 0),
-            ("DESCRIBE-SHARD", "BUCKET", 0),
+            lambda a: a.initialize_cluster(shards=3),
+            ("INITIALIZE-CLUSTER", "SHARDS", 3),
+            None,
+        ),
+        (lambda a: a.describe_cluster(), ("DESCRIBE-CLUSTER",), None),
+        (lambda a: a.add_shard(), ("ADD-SHARD",), None),
+        (
+            lambda a: a.describe_shard(0),
+            ("DESCRIBE-SHARD", 0),
             None,
         ),
         (lambda a: a.describe_member(), ("DESCRIBE-MEMBER",), None),
@@ -153,28 +159,28 @@ def sent(monkeypatch):
             None,
         ),
         (
-            lambda a: a.set_shard_status("BUCKET", "*", "READWRITE"),
-            ("SET-SHARD-STATUS", "BUCKET", "*", "READWRITE"),
+            lambda a: a.set_shard_status("*", "READWRITE"),
+            ("SET-SHARD-STATUS", "*", "READWRITE"),
             None,
         ),
         (
-            lambda a: a.set_shard_status("bucket", 2, "readonly"),
-            ("SET-SHARD-STATUS", "bucket", "2", "readonly"),
+            lambda a: a.set_shard_status(2, "readonly"),
+            ("SET-SHARD-STATUS", "2", "readonly"),
             None,
         ),
         (
-            lambda a: a.set_primary("BUCKET", 0, MEMBER),
-            ("ROUTE", "SET", "PRIMARY", "BUCKET", "0", MEMBER),
+            lambda a: a.set_primary(0, MEMBER),
+            ("ROUTE", "SET", "PRIMARY", "0", MEMBER),
             None,
         ),
         (
-            lambda a: a.set_standby("BUCKET", "*", STANDBY),
-            ("ROUTE", "SET", "STANDBY", "BUCKET", "*", STANDBY),
+            lambda a: a.set_standby("*", STANDBY),
+            ("ROUTE", "SET", "STANDBY", "*", STANDBY),
             None,
         ),
         (
-            lambda a: a.unset_standby("BUCKET", 0, STANDBY),
-            ("ROUTE", "UNSET", "STANDBY", "BUCKET", "0", STANDBY),
+            lambda a: a.unset_standby(0, STANDBY),
+            ("ROUTE", "UNSET", "STANDBY", "0", STANDBY),
             None,
         ),
         (lambda a: a.remove_member("006c"), ("REMOVE-MEMBER", "006c"), None),
@@ -242,21 +248,25 @@ def test_parse_describe_cluster():
         b"1.0.0",
         b"cluster_name",
         b"my-cluster",
-        b"bucket",
+        b"shards",
         [0, SHARD_RESP2, 1, SHARD_RESP2],
     ]
     resp3 = {
         b"metadata_version": b"1.0.0",
         b"cluster_name": b"my-cluster",
-        b"bucket": {0: SHARD_RESP3, 1: SHARD_RESP3},
+        b"shards": {0: SHARD_RESP3, 1: SHARD_RESP3},
     }
     expected = {
         "metadata_version": "1.0.0",
         "cluster_name": "my-cluster",
-        "bucket": {0: SHARD, 1: SHARD},
+        "shards": {0: SHARD, 1: SHARD},
     }
     for reply in (resp2, resp3):
         assert parse_kr_admin(reply, admin_subcommand="DESCRIBE-CLUSTER") == expected
+
+
+def test_parse_add_shard():
+    assert parse_kr_admin(1, admin_subcommand="ADD-SHARD") == 1
 
 
 def test_parse_silent_members():
@@ -310,22 +320,16 @@ def test_describe_cluster(admin):
     cluster = admin.describe_cluster()
     assert isinstance(cluster["metadata_version"], str)
     assert isinstance(cluster["cluster_name"], str)
-    shard = cluster["bucket"][0]
+    shard = cluster["shards"][0]
     assert isinstance(shard["primary"], str)
     assert isinstance(shard["standbys"], list)
     assert shard["status"] in ("READWRITE", "READONLY", "INOPERABLE")
-    assert shard["linked_volumes"] == ["bucket-shard-0"]
+    assert shard["linked_volume"] == "shard-0"
 
 
 @pytest.mark.integration
 def test_describe_shard_matches_the_cluster(admin):
-    assert admin.describe_shard("BUCKET", 0) == admin.describe_cluster()["bucket"][0]
-
-
-@pytest.mark.integration
-def test_describe_shard_refuses_an_unknown_kind(admin):
-    with pytest.raises(ResponseError, match="Unknown shard kind"):
-        admin.describe_shard("FOOBAR", 0)
+    assert admin.describe_shard(0) == admin.describe_cluster()["shards"][0]
 
 
 @pytest.mark.integration
@@ -352,7 +356,7 @@ def test_list_and_find_member(admin):
 
 @pytest.mark.integration
 def test_find_member_refuses_a_bad_id(admin):
-    with pytest.raises(ResponseError, match="Invalid memberId"):
+    with pytest.raises(ResponseError, match="Invalid member id"):
         admin.find_member("abc")
 
 
@@ -380,9 +384,25 @@ def test_initialize_cluster_runs_once(admin):
 
 
 @pytest.mark.integration
+def test_initialize_cluster_with_shards_runs_once(admin):
+    """``SHARDS`` reaches the server, which still refuses a second run."""
+    with pytest.raises(ResponseError, match="already been initialized"):
+        admin.initialize_cluster(shards=2)
+
+
+@pytest.mark.integration
+def test_initialize_cluster_refuses_a_non_positive_shard_count(admin):
+    """The count is checked before the cluster is, so this changes nothing."""
+    with pytest.raises(
+        ResponseError, match="SHARDS argument must be followed by a positive integer"
+    ):
+        admin.initialize_cluster(shards=0)
+
+
+@pytest.mark.integration
 def test_idempotent_status_writes(admin):
     """The statuses a healthy dev cluster already has, so nothing changes."""
-    assert admin.set_shard_status("BUCKET", "*", "READWRITE") is True
+    assert admin.set_shard_status("*", "READWRITE") is True
     me = admin.describe_member()["member_id"]
     assert admin.set_member_status(me, "RUNNING") is True
 
@@ -390,14 +410,14 @@ def test_idempotent_status_writes(admin):
 @pytest.mark.integration
 def test_set_shard_status_refuses_an_unknown_status(admin):
     with pytest.raises(ResponseError, match="Unknown shard status"):
-        admin.set_shard_status("BUCKET", 0, "DISABLED")
+        admin.set_shard_status(0, "DISABLED")
 
 
 @pytest.mark.integration
 def test_the_primary_cannot_be_a_standby(admin):
-    primary = admin.describe_shard("BUCKET", 0)["primary"]
-    with pytest.raises(ResponseError, match="primary cannot be assigned as a standby"):
-        admin.set_standby("BUCKET", 0, primary)
+    primary = admin.describe_shard(0)["primary"]
+    with pytest.raises(ResponseError, match="Primary cannot be assigned as a standby"):
+        admin.set_standby(0, primary)
 
 
 @pytest.mark.integration
@@ -410,5 +430,5 @@ def test_a_running_member_cannot_be_removed(admin):
 @pytest.mark.integration
 def test_drop_cluster_checks_the_name(admin):
     """A wrong name fails before a token is issued, so the real name is never sent."""
-    with pytest.raises(ResponseError, match="cluster name does not match"):
+    with pytest.raises(ResponseError, match="Cluster name does not match"):
         admin.drop_cluster("kronotop-py-no-such-cluster")

@@ -60,13 +60,25 @@ async def test_what_a_method_sends(monkeypatch):
         calls.append((args, options))
 
     monkeypatch.setattr(admin, "execute_command", record)
-    await admin.set_shard_status("BUCKET", "*", "READWRITE")
+    await admin.set_shard_status("*", "READWRITE")
     assert calls == [
         (
-            ("KR.ADMIN", "SET-SHARD-STATUS", "BUCKET", "*", "READWRITE"),
+            ("KR.ADMIN", "SET-SHARD-STATUS", "*", "READWRITE"),
             {"admin_subcommand": "SET-SHARD-STATUS"},
         )
     ]
+
+
+async def test_add_shard_sends_add_shard(monkeypatch):
+    calls = []
+    admin = Admin()
+
+    async def record(*args, **options):
+        calls.append((args, options))
+
+    monkeypatch.setattr(admin, "execute_command", record)
+    await admin.add_shard()
+    assert calls == [(("KR.ADMIN", "ADD-SHARD"), {"admin_subcommand": "ADD-SHARD"})]
 
 
 @pytest.mark.integration
@@ -77,9 +89,9 @@ async def test_ping(admin):
 @pytest.mark.integration
 async def test_describe_cluster(admin):
     cluster = await admin.describe_cluster()
-    shard = cluster["bucket"][0]
-    assert shard["linked_volumes"] == ["bucket-shard-0"]
-    assert await admin.describe_shard("BUCKET", 0) == shard
+    shard = cluster["shards"][0]
+    assert shard["linked_volume"] == "shard-0"
+    assert await admin.describe_shard(0) == shard
 
 
 @pytest.mark.integration
@@ -109,7 +121,7 @@ async def test_list_silent_members(admin):
 
 @pytest.mark.integration
 async def test_idempotent_status_writes(admin):
-    assert await admin.set_shard_status("BUCKET", "*", "READWRITE") is True
+    assert await admin.set_shard_status("*", "READWRITE") is True
     me = (await admin.describe_member())["member_id"]
     assert await admin.set_member_status(me, "RUNNING") is True
 
@@ -118,5 +130,13 @@ async def test_idempotent_status_writes(admin):
 async def test_errors_are_response_errors(admin):
     with pytest.raises(ResponseError, match="already been initialized"):
         await admin.initialize_cluster()
-    with pytest.raises(ResponseError, match="cluster name does not match"):
+    with pytest.raises(ResponseError, match="Cluster name does not match"):
         await admin.drop_cluster("kronotop-py-no-such-cluster")
+
+
+@pytest.mark.integration
+async def test_initialize_cluster_refuses_a_non_positive_shard_count(admin):
+    with pytest.raises(
+        ResponseError, match="SHARDS argument must be followed by a positive integer"
+    ):
+        await admin.initialize_cluster(shards=0)

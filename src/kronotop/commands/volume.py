@@ -16,7 +16,7 @@
 ``admin.volume``.
 
 A volume is the local storage of one shard, named after it, such as
-``bucket-shard-0``. The server answers these commands on the internal
+``shard-0``. The server answers these commands on the internal
 listener only, port 3320, and only for the volumes open on the member asked.
 ``list`` gives their names.
 

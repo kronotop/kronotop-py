@@ -26,7 +26,7 @@ from redis.exceptions import ResponseError
 from kronotop.asyncio import Admin
 from kronotop.commands.volume import AsyncVolume
 
-VOLUME = "bucket-shard-0"
+VOLUME = "shard-0"
 
 
 def test_the_group_is_bound():

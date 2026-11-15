@@ -36,7 +36,7 @@ from kronotop._callbacks import (
 from kronotop.commands.volume import Volume
 
 MEMBER = "006cdc459c59e600c76494e8388857fc3cba2fa8"
-VOLUME = "bucket-shard-0"
+VOLUME = "shard-0"
 KINDS = {"APPEND", "DELETE", "UPDATE", "INSERT"}
 
 #: ``DESCRIBE`` as RESP2 hands it over: every map is an array, the double is
@@ -47,7 +47,7 @@ DESCRIBE_RESP2 = [
     b"status",
     b"READWRITE",
     b"data_dir",
-    b"/tmp/kronotop/data/bucket-shard-0",
+    b"/tmp/kronotop/data/shard-0",
     b"segment_size",
     268435456,
     b"segments",
@@ -72,7 +72,7 @@ DESCRIBE_RESP2 = [
 DESCRIBE_RESP3 = {
     b"name": VOLUME.encode(),
     b"status": b"READWRITE",
-    b"data_dir": b"/tmp/kronotop/data/bucket-shard-0",
+    b"data_dir": b"/tmp/kronotop/data/shard-0",
     b"segment_size": 268435456,
     b"segments": {
         0: {
@@ -88,7 +88,7 @@ DESCRIBE_RESP3 = {
 DESCRIBED = {
     "name": VOLUME,
     "status": "READWRITE",
-    "data_dir": "/tmp/kronotop/data/bucket-shard-0",
+    "data_dir": "/tmp/kronotop/data/shard-0",
     "segment_size": 268435456,
     "segments": {
         0: {
@@ -376,8 +376,8 @@ def test_parse_describe(reply):
 
 
 def test_parse_list_and_orphan_files():
-    reply = [VOLUME.encode(), b"bucket-shard-1"]
-    expected = [VOLUME, "bucket-shard-1"]
+    reply = [VOLUME.encode(), b"shard-1"]
+    expected = [VOLUME, "shard-1"]
     assert parse_volume_admin(reply, volume_subcommand="LIST") == expected
     assert (
         parse_volume_admin(reply, volume_subcommand="CLEANUP-ORPHAN-FILES") == expected
@@ -622,7 +622,7 @@ def test_stats_opcounters_and_reset(admin):
 
 @pytest.mark.integration
 def test_stats_errors(admin):
-    with pytest.raises(ResponseError, match="Invalid memberId"):
+    with pytest.raises(ResponseError, match="Invalid member id"):
         admin.volume.stats_replication(VOLUME, "abc")
     with pytest.raises(ResponseError, match="is not open"):
         admin.volume.stats("no-such-volume")
@@ -669,15 +669,15 @@ def test_vacuum_status(admin):
 @pytest.mark.integration
 def test_replication_needs_a_standby(admin):
     me = admin.describe_member()["member_id"]
-    if me in admin.describe_shard("BUCKET", 0)["standbys"]:
-        pytest.skip("this member is a standby of bucket-shard-0")
+    if me in admin.describe_shard(0)["standbys"]:
+        pytest.skip("this member is a standby of shard-0")
     with pytest.raises(ResponseError, match="not a standby"):
         admin.volume.start_replication(VOLUME)
 
 
 @pytest.mark.integration
 def test_replication_status_refuses_a_bad_id(admin):
-    with pytest.raises(ResponseError, match="Invalid memberId"):
+    with pytest.raises(ResponseError, match="Invalid member id"):
         admin.volume.replication_status(VOLUME, "abc")
 
 
@@ -707,7 +707,7 @@ def test_segment_range_reads_the_head(admin):
 
 @pytest.mark.integration
 def test_segment_errors(admin):
-    with pytest.raises(ResponseError, match="could not be found"):
+    with pytest.raises(ResponseError, match="No such segment"):
         admin.volume.segment_range(VOLUME, 2**40, (0, 1))
     with pytest.raises(ResponseError, match="is not open"):
         admin.volume.segment_range("no-such-volume", 0, (0, 1))
