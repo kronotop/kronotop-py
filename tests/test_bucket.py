@@ -14,7 +14,6 @@
 
 from __future__ import annotations
 
-import itertools
 import json
 import struct
 import time
@@ -28,6 +27,7 @@ from redis.exceptions import ResponseError
 from kronotop import (
     BucketAlreadyExistsError,
     BucketBeingRemovedError,
+    CursorClosedError,
     DuplicateKeyError,
     Kronotop,
     KronotopConfig,
@@ -1043,7 +1043,7 @@ def test_query_with_a_limit(session, bucket):
         cursor_id = cursor.cursor_id
         sizes = [len(batch) for batch in cursor.batches()]
     assert sizes == [2, 1]
-    assert cursor.limit_reached
+    assert cursor.closed
     assert cursor.cursor_id == -1
     assert cursor_id not in session.bucket.cursors()["query"]
 
@@ -1064,18 +1064,73 @@ def test_query_with_close(session, bucket):
 def test_limit_reached_on_the_first_reply(session, bucket):
     session.bucket.insert(bucket, {"n": 1}, {"n": 2})
     with session.bucket.query(bucket, {}, limit=1) as cursor:
-        assert cursor.limit_reached
+        assert cursor.closed
         assert cursor.cursor_id == -1
 
 
 @pytest.mark.integration
-def test_a_limit_that_is_not_reached_keeps_the_cursor(session, bucket):
-    """Fewer matches than ``limit`` never reach it, so the cursor stays."""
+def test_fewer_matches_than_the_limit_end_the_cursor(session, bucket):
+    """The result set ends before ``limit``, and that closes the cursor."""
     session.bucket.insert(bucket, {"n": 1})
-    cursor = session.bucket.query(bucket, {}, limit=5)
-    cursor.advance()
-    assert not cursor.limit_reached
+    with session.bucket.query(bucket, {}, limit=5) as cursor:
+        assert len(cursor.batch) == 1
+        assert cursor.closed
+    assert session.bucket.cursors()["query"] == {}
+
+
+@pytest.mark.integration
+def test_a_small_result_set_ends_on_the_first_reply(session, bucket):
+    """The first reply holds every document, so the server keeps no cursor
+    and the ``with`` block has nothing to close."""
+    session.bucket.insert(bucket, {"n": 1}, {"n": 2})
+    with session.bucket.query(bucket, {}) as cursor:
+        assert len(cursor.batch) == 2
+        assert cursor.cursor_id == -1
+        assert cursor.closed
+        assert session.bucket.cursors()["query"] == {}
+        assert list(cursor.batches()) == [cursor.batch]
+
+
+@pytest.mark.integration
+def test_the_reply_after_a_full_batch_ends_the_cursor(session, bucket):
+    """A full batch leaves the cursor open. The next reply finds the end,
+    comes back empty and carries ``-1``."""
+    session.bucket.insert(bucket, {"n": 1}, {"n": 2})
+    with session.bucket.query(bucket, {}, batch=2) as cursor:
+        assert len(cursor.batch) == 2
+        assert not cursor.closed
+        assert cursor.advance() == []
+        assert cursor.cursor_id == -1
+    assert session.bucket.cursors()["query"] == {}
+
+
+@pytest.mark.integration
+def test_advance_after_the_end_raises(session, bucket):
+    session.bucket.insert(bucket, {"n": 1}, {"n": 2})
+    with session.bucket.query(bucket, {}, batch=1) as cursor:
+        cursor_id = cursor.cursor_id
+        list(cursor.batches())
+    with pytest.raises(ResponseError, match="No such cursor"):
+        session.bucket.advance(cursor_id)
+
+
+@pytest.mark.integration
+def test_cursor_advance_after_the_end_raises_on_the_client(session, bucket):
+    session.bucket.insert(bucket, {"n": 1}, {"n": 2})
+    with session.bucket.query(bucket, {}) as cursor:
+        assert cursor.closed
+        with pytest.raises(CursorClosedError):
+            cursor.advance()
+    assert session.bucket.cursors()["query"] == {}
+
+
+@pytest.mark.integration
+def test_cursor_advance_after_close_raises_on_the_client(session, bucket):
+    session.bucket.insert(bucket, {"n": 1}, {"n": 2})
+    cursor = session.bucket.query(bucket, {}, batch=1)
     cursor.close()
+    with pytest.raises(CursorClosedError):
+        cursor.advance()
     assert session.bucket.cursors()["query"] == {}
 
 
@@ -1084,7 +1139,7 @@ def test_advance_after_the_limit_raises(session, bucket):
     session.bucket.insert(bucket, {"n": 1})
     with (
         session.bucket.query(bucket, {}, limit=1) as cursor,
-        pytest.raises(ResponseError),
+        pytest.raises(CursorClosedError),
     ):
         cursor.advance()
 
@@ -1367,7 +1422,7 @@ def test_parse_bucket_advance_picks_the_parser():
     assert isinstance(parse_bucket_advance([7, []], operation="delete"), ObjectIdBatch)
 
 
-def test_limit_reached_follows_the_cursor_id():
+def test_closed_follows_the_cursor_id():
     """A cursor id of ``-1`` is the server's way to say the cursor is gone,
     so ``close`` has nothing to send."""
 
@@ -1380,13 +1435,42 @@ def test_limit_reached_follows_the_cursor_id():
 
     group = Group()
     gone = Cursor(group, "users", -1, [], "query")
-    assert gone.limit_reached
+    assert gone.closed
     gone.close()
     assert group.closed == []
     open_ = Cursor(group, "users", 1, [], "query")
-    assert not open_.limit_reached
+    assert not open_.closed
+    open_.close()
+    assert open_.closed
     open_.close()
     assert group.closed == [1]
+
+
+def test_advance_on_a_closed_cursor_sends_nothing():
+    """The server dropped the cursor, or ``close`` did, so a
+    ``BUCKET.ADVANCE`` could only fail with ``No such cursor``."""
+
+    class Group:
+        def __init__(self):
+            self.advanced = []
+
+        def advance(self, cursor_id, operation):
+            self.advanced.append(cursor_id)
+            return QueryBatch(cursor_id, [])
+
+        def close(self, cursor_id, operation):
+            pass
+
+    group = Group()
+    gone = Cursor(group, "users", -1, [], "query")
+    with pytest.raises(CursorClosedError):
+        gone.advance()
+    closed = Cursor(group, "users", 1, [], "query")
+    closed.advance()
+    closed.close()
+    with pytest.raises(CursorClosedError):
+        closed.advance()
+    assert group.advanced == [1]
 
 
 @pytest.mark.integration
@@ -1422,7 +1506,7 @@ def test_delete_with_a_limit(session, bucket):
     with session.bucket.delete(bucket, {}, batch=2, limit=3) as cursor:
         sizes = [len(batch) for batch in cursor.batches()]
     assert sizes == [2, 1]
-    assert cursor.limit_reached
+    assert cursor.closed
     with session.bucket.query(bucket, {}) as cursor:
         assert len(cursor.batch) == 2
 
@@ -1471,16 +1555,24 @@ def test_delete_batches(session, bucket):
     deleted = []
     with session.bucket.delete(bucket, {}, batch=2) as cursor:
         for batch in cursor.batches():
-            if not batch:
-                break
             deleted.extend(batch)
     assert sorted(deleted) == sorted(ids)
+    assert cursor.closed
+
+
+@pytest.mark.integration
+def test_a_delete_ends_with_the_result_set(session, bucket):
+    session.bucket.insert(bucket, {"n": 1}, {"n": 2})
+    with session.bucket.delete(bucket, {}) as cursor:
+        assert len(cursor.batch) == 2
+        assert cursor.cursor_id == -1
+    assert session.bucket.cursors()["delete"] == {}
 
 
 @pytest.mark.integration
 def test_the_delete_cursor_id_holds_without_a_limit(session, bucket):
-    session.bucket.insert(bucket, {"n": 1})
-    with session.bucket.delete(bucket, {}) as cursor:
+    session.bucket.insert(bucket, {"n": 1}, {"n": 2}, {"n": 3})
+    with session.bucket.delete(bucket, {}, batch=1) as cursor:
         cursor_id = cursor.cursor_id
         cursor.advance()
         assert cursor.cursor_id == cursor_id
@@ -1488,30 +1580,35 @@ def test_the_delete_cursor_id_holds_without_a_limit(session, bucket):
 
 @pytest.mark.integration
 def test_delete_close(session, bucket):
-    cursor = session.bucket.delete(bucket, {})
+    session.bucket.insert(bucket, {"n": 1}, {"n": 2})
+    cursor = session.bucket.delete(bucket, {}, batch=1)
+    cursor_id = cursor.cursor_id
     cursor.close()
-    with pytest.raises(ResponseError):
-        session.bucket.advance(cursor.cursor_id, "delete")
+    with pytest.raises(ResponseError, match="No such cursor"):
+        session.bucket.advance(cursor_id, "delete")
 
 
 @pytest.mark.integration
 def test_delete_close_twice_on_the_cursor(session, bucket):
-    cursor = session.bucket.delete(bucket, {})
+    session.bucket.insert(bucket, {"n": 1}, {"n": 2})
+    cursor = session.bucket.delete(bucket, {}, batch=1)
     cursor.close()
     cursor.close()
 
 
 @pytest.mark.integration
 def test_delete_close_twice_on_the_group(session, bucket):
-    cursor = session.bucket.delete(bucket, {})
+    session.bucket.insert(bucket, {"n": 1}, {"n": 2})
+    cursor = session.bucket.delete(bucket, {}, batch=1)
     assert session.bucket.close(cursor.cursor_id, "delete") is True
-    with pytest.raises(ResponseError):
+    with pytest.raises(ResponseError, match="No such cursor"):
         session.bucket.close(cursor.cursor_id, "delete")
 
 
 @pytest.mark.integration
 def test_a_delete_cursor_shows_up_in_cursors(session, bucket):
-    with session.bucket.delete(bucket, {"n": 1}) as cursor:
+    session.bucket.insert(bucket, {"n": 1}, {"n": 1})
+    with session.bucket.delete(bucket, {"n": 1}, batch=1) as cursor:
         cursors = session.bucket.cursors()
         assert cursors["delete"][cursor.cursor_id] == {"n": 1}
     assert session.bucket.cursors()["delete"] == {}
@@ -1668,7 +1765,7 @@ def test_update_with_a_limit(session, bucket):
     ) as cursor:
         sizes = [len(batch) for batch in cursor.batches()]
     assert sizes == [2, 1]
-    assert cursor.limit_reached
+    assert cursor.closed
     with session.bucket.query(bucket, {"seen": True}) as cursor:
         assert len(cursor.batch) == 3
 
@@ -1726,16 +1823,24 @@ def test_update_batches(session, bucket):
     updated = []
     with session.bucket.update(bucket, {}, {"$set": {"seen": True}}, batch=2) as cursor:
         for batch in cursor.batches():
-            if not batch:
-                break
             updated.extend(batch)
     assert sorted(updated) == sorted(ids)
+    assert cursor.closed
+
+
+@pytest.mark.integration
+def test_an_update_ends_with_the_result_set(session, bucket):
+    session.bucket.insert(bucket, {"n": 1}, {"n": 2})
+    with session.bucket.update(bucket, {}, {"$set": {"seen": True}}) as cursor:
+        assert len(cursor.batch) == 2
+        assert cursor.cursor_id == -1
+    assert session.bucket.cursors()["update"] == {}
 
 
 @pytest.mark.integration
 def test_the_update_cursor_id_holds_without_a_limit(session, bucket):
-    session.bucket.insert(bucket, {"n": 1})
-    with session.bucket.update(bucket, {}, {"$set": {"seen": True}}) as cursor:
+    session.bucket.insert(bucket, {"n": 1}, {"n": 2}, {"n": 3})
+    with session.bucket.update(bucket, {}, {"$set": {"seen": True}}, batch=1) as cursor:
         cursor_id = cursor.cursor_id
         cursor.advance()
         assert cursor.cursor_id == cursor_id
@@ -1743,30 +1848,37 @@ def test_the_update_cursor_id_holds_without_a_limit(session, bucket):
 
 @pytest.mark.integration
 def test_update_close(session, bucket):
-    cursor = session.bucket.update(bucket, {}, {"$set": {"seen": True}})
+    session.bucket.insert(bucket, {"n": 1}, {"n": 2})
+    cursor = session.bucket.update(bucket, {}, {"$set": {"seen": True}}, batch=1)
+    cursor_id = cursor.cursor_id
     cursor.close()
-    with pytest.raises(ResponseError):
-        session.bucket.advance(cursor.cursor_id, "update")
+    with pytest.raises(ResponseError, match="No such cursor"):
+        session.bucket.advance(cursor_id, "update")
 
 
 @pytest.mark.integration
 def test_update_close_twice_on_the_cursor(session, bucket):
-    cursor = session.bucket.update(bucket, {}, {"$set": {"seen": True}})
+    session.bucket.insert(bucket, {"n": 1}, {"n": 2})
+    cursor = session.bucket.update(bucket, {}, {"$set": {"seen": True}}, batch=1)
     cursor.close()
     cursor.close()
 
 
 @pytest.mark.integration
 def test_update_close_twice_on_the_group(session, bucket):
-    cursor = session.bucket.update(bucket, {}, {"$set": {"seen": True}})
+    session.bucket.insert(bucket, {"n": 1}, {"n": 2})
+    cursor = session.bucket.update(bucket, {}, {"$set": {"seen": True}}, batch=1)
     assert session.bucket.close(cursor.cursor_id, "update") is True
-    with pytest.raises(ResponseError):
+    with pytest.raises(ResponseError, match="No such cursor"):
         session.bucket.close(cursor.cursor_id, "update")
 
 
 @pytest.mark.integration
 def test_an_update_cursor_shows_up_in_cursors(session, bucket):
-    with session.bucket.update(bucket, {"n": 1}, {"$set": {"seen": True}}) as cursor:
+    session.bucket.insert(bucket, {"n": 1}, {"n": 1})
+    with session.bucket.update(
+        bucket, {"n": 1}, {"$set": {"seen": True}}, batch=1
+    ) as cursor:
         cursors = session.bucket.cursors()
         assert cursors["update"][cursor.cursor_id] == {"n": 1}
     assert session.bucket.cursors()["update"] == {}
@@ -1818,16 +1930,17 @@ def test_advance(session, bucket):
 def test_batches(session, bucket):
     session.bucket.insert(bucket, {"n": 1}, {"n": 2}, {"n": 3})
     with session.bucket.query(bucket, {}, batch=2) as cursor:
-        batches = list(itertools.islice(cursor.batches(), 3))
-    assert [len(batch) for batch in batches] == [2, 1, 0]
+        batches = list(cursor.batches())
+    assert [len(batch) for batch in batches] == [2, 1]
+    assert cursor.closed
 
 
 @pytest.mark.integration
 def test_the_cursor_id_holds_without_a_limit(session, bucket):
-    """Every reply echoes the same id until ``limit`` is reached, which is
-    why ``advance`` needs no id."""
-    session.bucket.insert(bucket, {"n": 1})
-    with session.bucket.query(bucket, {}) as cursor:
+    """Every reply echoes the same id until the last one, so ``advance``
+    needs no id."""
+    session.bucket.insert(bucket, {"n": 1}, {"n": 2}, {"n": 3})
+    with session.bucket.query(bucket, {}, batch=1) as cursor:
         cursor_id = cursor.cursor_id
         cursor.advance()
         assert cursor.cursor_id == cursor_id
@@ -1845,16 +1958,20 @@ def test_group_advance_returns_the_record(session, bucket):
 
 @pytest.mark.integration
 def test_close(session, bucket):
-    cursor = session.bucket.query(bucket, {})
+    session.bucket.insert(bucket, {"n": 1}, {"n": 2})
+    cursor = session.bucket.query(bucket, {}, batch=1)
+    cursor_id = cursor.cursor_id
     cursor.close()
-    with pytest.raises(ResponseError):
-        session.bucket.advance(cursor.cursor_id)
+    assert cursor.closed
+    with pytest.raises(ResponseError, match="No such cursor"):
+        session.bucket.advance(cursor_id)
 
 
 @pytest.mark.integration
 def test_close_twice_on_the_cursor(session, bucket):
     """The cursor holds a flag, so the second call sends nothing."""
-    cursor = session.bucket.query(bucket, {})
+    session.bucket.insert(bucket, {"n": 1}, {"n": 2})
+    cursor = session.bucket.query(bucket, {}, batch=1)
     cursor.close()
     cursor.close()
 
@@ -1870,23 +1987,29 @@ def test_cursor_close_failure_does_not_mask_the_original_error(
     """
     with kr.session() as s:
         s.ping()
+        s.bucket.insert(bucket, {"n": 1}, {"n": 2})
         conn = s._redis.connection
-        with pytest.raises(redis.TimeoutError), s.bucket.query(bucket, {}) as cursor:
+        with (
+            pytest.raises(redis.TimeoutError),
+            s.bucket.query(bucket, {}, batch=1) as cursor,
+        ):
             conn.read_response = timeout_once(conn)
             cursor.advance()
 
 
 @pytest.mark.integration
 def test_close_twice_on_the_group(session, bucket):
-    cursor = session.bucket.query(bucket, {})
+    session.bucket.insert(bucket, {"n": 1}, {"n": 2})
+    cursor = session.bucket.query(bucket, {}, batch=1)
     assert session.bucket.close(cursor.cursor_id) is True
-    with pytest.raises(ResponseError):
+    with pytest.raises(ResponseError, match="No such cursor"):
         session.bucket.close(cursor.cursor_id)
 
 
 @pytest.mark.integration
 def test_cursors(session, bucket):
-    with session.bucket.query(bucket, {"n": 1}) as cursor:
+    session.bucket.insert(bucket, {"n": 1}, {"n": 1})
+    with session.bucket.query(bucket, {"n": 1}, batch=1) as cursor:
         cursors = session.bucket.cursors()
         assert cursors["query"][cursor.cursor_id] == {"n": 1}
         assert cursors["update"] == {}
@@ -1896,7 +2019,8 @@ def test_cursors(session, bucket):
 
 @pytest.mark.integration
 def test_cursors_for_one_operation(session, bucket):
-    with session.bucket.query(bucket, {}) as cursor:
+    session.bucket.insert(bucket, {"n": 1}, {"n": 2})
+    with session.bucket.query(bucket, {}, batch=1) as cursor:
         cursors = session.bucket.cursors("query")
         assert list(cursors) == ["query"]
         assert cursor.cursor_id in cursors["query"]

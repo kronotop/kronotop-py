@@ -12,7 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Asyncio interface to Kronotop, in its own namespace::
+"""Asyncio interface to Kronotop.
+
+The client lives in its own namespace::
 
     from kronotop.asyncio import Kronotop
 """

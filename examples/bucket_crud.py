@@ -42,7 +42,8 @@ async def main() -> None:
         print("inserted:", ids)
 
         # Read. The query is a mapping, and the first batch is in
-        # ``cursor.batch``. Three documents fit in one batch here.
+        # ``cursor.batch``. Two documents match and fit in one batch, so the
+        # cursor closes on this first reply.
         async with session.bucket.query(BUCKET, {"status": "pending"}) as cursor:
             for document in cursor.batch:
                 print("read    :", document["name"], document["status"])

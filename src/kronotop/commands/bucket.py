@@ -45,6 +45,7 @@ from kronotop.commands.base import (
     SyncClient,
     namespace_args,
 )
+from kronotop.exceptions import CursorClosedError
 
 __all__ = [
     "AsyncBucket",
@@ -310,14 +311,14 @@ Operation = Literal["query", "update", "delete"]
 class QueryBatch(NamedTuple):
     """One reply of ``BUCKET.QUERY`` or ``BUCKET.ADVANCE QUERY``.
 
-    The cursor id is the same in every reply of one cursor. The reply that
-    reaches ``limit``, or the reply of a command sent with ``close``, carries
-    ``-1`` and the cursor is gone.
+    Every reply of one cursor carries the same cursor id, except the last,
+    which carries ``-1``. The cursor is gone after it, see :attr:`Cursor.closed`.
     """
 
     #: Cursor the batch came from.
     cursor_id: int
-    #: The documents of this batch. Empty does not mean the cursor is done.
+    #: The documents of this batch. It can be empty while the cursor is still
+    #: open.
     documents: list[dict[str, Any]]
 
 
@@ -332,8 +333,8 @@ class ObjectIdBatch(NamedTuple):
 
     #: Cursor the batch came from.
     cursor_id: int
-    #: Ids of the documents this batch updated or deleted. Empty does not mean
-    #: the cursor is done.
+    #: Ids of the documents this batch updated or deleted. It can be empty
+    #: while the cursor is still open.
     object_ids: list[ObjectId]
 
 
@@ -647,9 +648,11 @@ async def _aadvance(group: Any, cursor_id: int, operation: Operation) -> Any:
 class _CursorBase(Generic[BatchT]):
     """What a cursor holds. The I/O is in the two subclasses.
 
-    A cursor is server side state, bound to the session that opened it. It
-    never times out, so close it or close the session. ``BatchT`` is what one
-    batch holds, documents on a query cursor and ObjectIds on a write cursor.
+    A cursor is server side state, bound to the session that opened it. The
+    server drops it after the last batch. It never times out, so a cursor you
+    stop reading early stays until you close it or the session. ``BatchT`` is
+    what one batch holds, documents on a query cursor and ObjectIds on a write
+    cursor.
     """
 
     def __init__(
@@ -667,8 +670,7 @@ class _CursorBase(Generic[BatchT]):
         self._operation = operation
         #: Bucket the command ran against.
         self.bucket = bucket
-        #: Id the server gave this cursor. ``-1`` once ``limit`` is reached or
-        #: the command was sent with ``close``.
+        #: Id the server gave this cursor, ``-1`` after the last batch.
         self.cursor_id = cursor_id
         #: The batch that arrived last. The first one is the opening command's
         #: own reply.
@@ -680,14 +682,24 @@ class _CursorBase(Generic[BatchT]):
         )
 
     @property
-    def limit_reached(self) -> bool:
-        """Whether the server removed the cursor.
+    def closed(self) -> bool:
+        """Whether the cursor is gone and nothing is left to advance or close.
 
-        The reply that reaches ``limit``, or the reply of a command sent with
-        ``close``, carries cursor id ``-1``, and nothing is left to advance or
-        close.
+        The server drops the cursor when the result set ends, when ``limit``
+        is reached, and after the first batch of a command sent with
+        ``close``. That reply carries cursor id ``-1``. :meth:`close` drops it
+        from this side.
         """
-        return self.cursor_id == -1
+        return self._closed or self.cursor_id == -1
+
+    def _check_open(self) -> None:
+        """Raise :class:`~kronotop.exceptions.CursorClosedError` if closed.
+
+        ``BUCKET.ADVANCE`` on a closed cursor names cursor ``-1`` or one the
+        server no longer has, and the server answers ``No such cursor``.
+        """
+        if self.closed:
+            raise CursorClosedError(f"{self!r} is closed")
 
     def _take(self, record: Any) -> BatchT:
         """Keep the id and the payload of one ``BUCKET.ADVANCE`` reply."""
@@ -704,36 +716,39 @@ class Cursor(_CursorBase[BatchT]):
     A query cursor's batch holds documents, an update or delete cursor's the
     ObjectIds of the documents the batch changed.
 
-    ``batches`` does not end on its own. A query that matches little can hand
-    back several empty batches while the scan goes on, so the caller decides
-    when to stop. With ``limit`` it ends on the reply that reaches it, and
-    with ``close`` after the first batch.
+    ``batches`` stops after the last batch. A query that matches little can
+    return empty batches while the scan goes on, so only :attr:`closed` tells
+    you the cursor is done. When the previous batch was full, the last one
+    comes back empty.
 
     ```python
     with session.bucket.query("users", {"age": {"$gt": 20}}) as cursor:
         for batch in cursor.batches():
-            if not batch:
-                break
             for document in batch:
                 print(document)
     ```
     """
 
     def advance(self) -> BatchT:
-        """``BUCKET.ADVANCE``. Fetch the next batch and keep it."""
+        """``BUCKET.ADVANCE``. Fetch the next batch and keep it.
+
+        Raises :class:`~kronotop.exceptions.CursorClosedError` once the cursor
+        is :attr:`closed`, and sends nothing.
+        """
+        self._check_open()
         return self._take(self._group.advance(self.cursor_id, self._operation))
 
     def batches(self) -> Iterator[BatchT]:
         """Yield the batch in hand, then one per ``advance``, until the cursor
-        id is ``-1``. Without ``limit`` or ``close`` it does not end."""
+        is closed."""
         yield self.batch
-        while not self.limit_reached:
+        while not self.closed:
             yield self.advance()
 
     def close(self) -> None:
         """``BUCKET.CLOSE``. Free the cursor. Calling it twice is safe, and a
         cursor the server removed sends nothing."""
-        if self._closed or self.limit_reached:
+        if self.closed:
             return
         self._closed = True
         self._group.close(self.cursor_id, self._operation)
@@ -761,26 +776,31 @@ class AsyncCursor(_CursorBase[BatchT]):
     ```python
     async with session.bucket.query("users", {}) as cursor:
         async for batch in cursor.batches():
-            if not batch:
-                break
+            for document in batch:
+                print(document)
     ```
     """
 
     async def advance(self) -> BatchT:
-        """``BUCKET.ADVANCE``. Fetch the next batch and keep it."""
+        """``BUCKET.ADVANCE``. Fetch the next batch and keep it.
+
+        Raises :class:`~kronotop.exceptions.CursorClosedError` once the cursor
+        is :attr:`closed`, and sends nothing.
+        """
+        self._check_open()
         return self._take(await self._group.advance(self.cursor_id, self._operation))
 
     async def batches(self) -> AsyncIterator[BatchT]:
         """Yield the batch in hand, then one per ``advance``, until the cursor
-        id is ``-1``. Without ``limit`` or ``close`` it does not end."""
+        is closed."""
         yield self.batch
-        while not self.limit_reached:
+        while not self.closed:
             yield await self.advance()
 
     async def close(self) -> None:
         """``BUCKET.CLOSE``. Free the cursor. Calling it twice is safe, and a
         cursor the server removed sends nothing."""
-        if self._closed or self.limit_reached:
+        if self.closed:
             return
         self._closed = True
         await self._group.close(self.cursor_id, self._operation)
@@ -1251,8 +1271,9 @@ class BucketCommands(CommandsBase):
 
         ``query`` is a mapping such as ``{"age": {"$gt": 20}}``, and ``{}``
         matches every document. The command runs at once and the first batch
-        is in :attr:`Cursor.batch`. Read the rest with :meth:`Cursor.batches`
-        and close the cursor when done.
+        is in :attr:`Cursor.batch`. Read the rest with :meth:`Cursor.batches`.
+        A cursor read to the end closes itself. Close one you stop reading
+        early.
 
         ``sort`` is ``SORTBY``, a field and a direction such as
         ``("age", "desc")``. It needs an index that gives that order, which
@@ -1267,7 +1288,7 @@ class BucketCommands(CommandsBase):
         ``batch`` is how many documents come back per batch, else the session
         attribute ``batch`` decides. ``limit`` caps the whole cursor, ``0``
         means no limit, and the reply that reaches it carries cursor id ``-1``,
-        see :attr:`Cursor.limit_reached`. ``collation`` is the string ordering
+        see :attr:`Cursor.closed`. ``collation`` is the string ordering
         of the query and does not reach ``sort``.
 
         ``close`` is ``CLOSE``, for a caller that needs one batch. The reply
@@ -1649,12 +1670,12 @@ class BucketCommands(CommandsBase):
         The cursor keeps everything the opening command was called with, so
         this takes the id and the operation alone. The reply is a
         :class:`QueryBatch` on a query and an :class:`ObjectIdBatch` on an
-        update or a delete. A cursor id of ``-1`` means ``limit`` was reached
-        and the cursor is gone.
+        update or a delete. A cursor id of ``-1`` means this was the last
+        batch and the cursor is gone.
 
-        An empty batch does not mean the cursor is done. A cursor that was
-        closed, gone at ``limit`` or by ``close``, or opened by another
-        command, raises a plain ``redis.ResponseError``.
+        An empty batch with any other id means the scan goes on. A cursor that
+        is gone, or one opened by another command, raises a plain
+        ``redis.ResponseError``.
         :meth:`Cursor.advance` is the same command through the cursor.
         """
         if self._is_async_client:
@@ -1674,8 +1695,9 @@ class BucketCommands(CommandsBase):
     def close(self, cursor_id: int, operation: Operation = "query") -> Any:
         """``BUCKET.CLOSE``. Free a cursor.
 
-        A cursor holds state in the session and never times out. Closing the
-        session frees every cursor it opened. A second close raises a plain
+        A cursor holds state in the session and never times out. The server
+        drops it after the last batch, and closing the session frees every
+        cursor it opened. Closing a cursor that is already gone raises a plain
         ``redis.ResponseError``.
         """
         return self.execute_command("BUCKET.CLOSE", operation.upper(), cursor_id)

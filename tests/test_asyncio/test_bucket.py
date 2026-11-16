@@ -29,6 +29,7 @@ from redis.exceptions import ResponseError
 from kronotop import (
     BucketAlreadyExistsError,
     BucketBeingRemovedError,
+    CursorClosedError,
     DuplicateKeyError,
     KronotopConfig,
     NoSuchBucketError,
@@ -116,7 +117,31 @@ def test_the_group_is_not_on_the_client():
     assert not hasattr(Kronotop(), "bucket")
 
 
-async def test_limit_reached_follows_the_cursor_id():
+async def test_advance_on_a_closed_cursor_sends_nothing():
+    class Group:
+        def __init__(self):
+            self.advanced = []
+
+        async def advance(self, cursor_id, operation):
+            self.advanced.append(cursor_id)
+            return QueryBatch(cursor_id, [])
+
+        async def close(self, cursor_id, operation):
+            pass
+
+    group = Group()
+    gone = AsyncCursor(group, "users", -1, [], "query")
+    with pytest.raises(CursorClosedError):
+        await gone.advance()
+    closed = AsyncCursor(group, "users", 1, [], "query")
+    await closed.advance()
+    await closed.close()
+    with pytest.raises(CursorClosedError):
+        await closed.advance()
+    assert group.advanced == [1]
+
+
+async def test_closed_follows_the_cursor_id():
     """A cursor id of ``-1`` is the server's way to say the cursor is gone,
     so ``close`` has nothing to send."""
 
@@ -129,11 +154,13 @@ async def test_limit_reached_follows_the_cursor_id():
 
     group = Group()
     gone = AsyncCursor(group, "users", -1, [], "query")
-    assert gone.limit_reached
+    assert gone.closed
     await gone.close()
     assert group.closed == []
     open_ = AsyncCursor(group, "users", 1, [], "query")
-    assert not open_.limit_reached
+    assert not open_.closed
+    await open_.close()
+    assert open_.closed
     await open_.close()
     assert group.closed == [1]
 
@@ -634,7 +661,7 @@ async def test_query_with_a_limit(session, bucket):
         async for batch in cursor.batches():
             sizes.append(len(batch))
     assert sizes == [2, 1]
-    assert cursor.limit_reached
+    assert cursor.closed
     assert cursor.cursor_id == -1
     assert cursor_id not in (await session.bucket.cursors())["query"]
 
@@ -655,17 +682,69 @@ async def test_query_with_close(session, bucket):
 async def test_limit_reached_on_the_first_reply(session, bucket):
     await session.bucket.insert(bucket, {"n": 1}, {"n": 2})
     async with session.bucket.query(bucket, {}, limit=1) as cursor:
-        assert cursor.limit_reached
+        assert cursor.closed
         assert cursor.cursor_id == -1
 
 
 @pytest.mark.integration
-async def test_a_limit_that_is_not_reached_keeps_the_cursor(session, bucket):
+async def test_fewer_matches_than_the_limit_end_the_cursor(session, bucket):
     await session.bucket.insert(bucket, {"n": 1})
-    cursor = await session.bucket.query(bucket, {}, limit=5)
-    await cursor.advance()
-    assert not cursor.limit_reached
+    async with session.bucket.query(bucket, {}, limit=5) as cursor:
+        assert len(cursor.batch) == 1
+        assert cursor.closed
+    assert (await session.bucket.cursors())["query"] == {}
+
+
+@pytest.mark.integration
+async def test_a_small_result_set_ends_on_the_first_reply(session, bucket):
+    await session.bucket.insert(bucket, {"n": 1}, {"n": 2})
+    async with session.bucket.query(bucket, {}) as cursor:
+        assert len(cursor.batch) == 2
+        assert cursor.cursor_id == -1
+        assert cursor.closed
+        assert (await session.bucket.cursors())["query"] == {}
+        assert [batch async for batch in cursor.batches()] == [cursor.batch]
+
+
+@pytest.mark.integration
+async def test_the_reply_after_a_full_batch_ends_the_cursor(session, bucket):
+    await session.bucket.insert(bucket, {"n": 1}, {"n": 2})
+    async with session.bucket.query(bucket, {}, batch=2) as cursor:
+        assert len(cursor.batch) == 2
+        assert not cursor.closed
+        assert await cursor.advance() == []
+        assert cursor.cursor_id == -1
+    assert (await session.bucket.cursors())["query"] == {}
+
+
+@pytest.mark.integration
+async def test_advance_after_the_end_raises(session, bucket):
+    await session.bucket.insert(bucket, {"n": 1}, {"n": 2})
+    async with session.bucket.query(bucket, {}, batch=1) as cursor:
+        cursor_id = cursor.cursor_id
+        async for _ in cursor.batches():
+            pass
+    with pytest.raises(ResponseError, match="No such cursor"):
+        await session.bucket.advance(cursor_id)
+
+
+@pytest.mark.integration
+async def test_cursor_advance_after_the_end_raises_on_the_client(session, bucket):
+    await session.bucket.insert(bucket, {"n": 1}, {"n": 2})
+    async with session.bucket.query(bucket, {}) as cursor:
+        assert cursor.closed
+        with pytest.raises(CursorClosedError):
+            await cursor.advance()
+    assert (await session.bucket.cursors())["query"] == {}
+
+
+@pytest.mark.integration
+async def test_cursor_advance_after_close_raises_on_the_client(session, bucket):
+    await session.bucket.insert(bucket, {"n": 1}, {"n": 2})
+    cursor = await session.bucket.query(bucket, {}, batch=1)
     await cursor.close()
+    with pytest.raises(CursorClosedError):
+        await cursor.advance()
     assert (await session.bucket.cursors())["query"] == {}
 
 
@@ -673,7 +752,7 @@ async def test_a_limit_that_is_not_reached_keeps_the_cursor(session, bucket):
 async def test_advance_after_the_limit_raises(session, bucket):
     await session.bucket.insert(bucket, {"n": 1})
     async with session.bucket.query(bucket, {}, limit=1) as cursor:
-        with pytest.raises(ResponseError):
+        with pytest.raises(CursorClosedError):
             await cursor.advance()
 
 
@@ -901,7 +980,7 @@ async def test_delete_with_a_limit(session, bucket):
         async for batch in cursor.batches():
             sizes.append(len(batch))
     assert sizes == [2, 1]
-    assert cursor.limit_reached
+    assert cursor.closed
     async with session.bucket.query(bucket, {}) as cursor:
         assert len(cursor.batch) == 2
 
@@ -952,10 +1031,18 @@ async def test_delete_batches(session, bucket):
     deleted = []
     async with session.bucket.delete(bucket, {}, batch=2) as cursor:
         async for batch in cursor.batches():
-            if not batch:
-                break
             deleted.extend(batch)
     assert sorted(deleted) == sorted(ids)
+    assert cursor.closed
+
+
+@pytest.mark.integration
+async def test_a_delete_ends_with_the_result_set(session, bucket):
+    await session.bucket.insert(bucket, {"n": 1}, {"n": 2})
+    async with session.bucket.delete(bucket, {}) as cursor:
+        assert len(cursor.batch) == 2
+        assert cursor.cursor_id == -1
+    assert (await session.bucket.cursors())["delete"] == {}
 
 
 @pytest.mark.integration
@@ -969,8 +1056,8 @@ async def test_delete_is_awaitable_and_a_context_manager(session, bucket):
 
 @pytest.mark.integration
 async def test_the_delete_cursor_id_holds_without_a_limit(session, bucket):
-    await session.bucket.insert(bucket, {"n": 1})
-    async with session.bucket.delete(bucket, {}) as cursor:
+    await session.bucket.insert(bucket, {"n": 1}, {"n": 2}, {"n": 3})
+    async with session.bucket.delete(bucket, {}, batch=1) as cursor:
         cursor_id = cursor.cursor_id
         await cursor.advance()
         assert cursor.cursor_id == cursor_id
@@ -978,30 +1065,35 @@ async def test_the_delete_cursor_id_holds_without_a_limit(session, bucket):
 
 @pytest.mark.integration
 async def test_delete_close(session, bucket):
-    cursor = await session.bucket.delete(bucket, {})
+    await session.bucket.insert(bucket, {"n": 1}, {"n": 2})
+    cursor = await session.bucket.delete(bucket, {}, batch=1)
+    cursor_id = cursor.cursor_id
     await cursor.close()
-    with pytest.raises(ResponseError):
-        await session.bucket.advance(cursor.cursor_id, "delete")
+    with pytest.raises(ResponseError, match="No such cursor"):
+        await session.bucket.advance(cursor_id, "delete")
 
 
 @pytest.mark.integration
 async def test_delete_close_twice_on_the_cursor(session, bucket):
-    cursor = await session.bucket.delete(bucket, {})
+    await session.bucket.insert(bucket, {"n": 1}, {"n": 2})
+    cursor = await session.bucket.delete(bucket, {}, batch=1)
     await cursor.close()
     await cursor.close()
 
 
 @pytest.mark.integration
 async def test_delete_close_twice_on_the_group(session, bucket):
-    cursor = await session.bucket.delete(bucket, {})
+    await session.bucket.insert(bucket, {"n": 1}, {"n": 2})
+    cursor = await session.bucket.delete(bucket, {}, batch=1)
     assert await session.bucket.close(cursor.cursor_id, "delete") is True
-    with pytest.raises(ResponseError):
+    with pytest.raises(ResponseError, match="No such cursor"):
         await session.bucket.close(cursor.cursor_id, "delete")
 
 
 @pytest.mark.integration
 async def test_a_delete_cursor_shows_up_in_cursors(session, bucket):
-    async with session.bucket.delete(bucket, {"n": 1}) as cursor:
+    await session.bucket.insert(bucket, {"n": 1}, {"n": 1})
+    async with session.bucket.delete(bucket, {"n": 1}, batch=1) as cursor:
         cursors = await session.bucket.cursors()
         assert cursors["delete"][cursor.cursor_id] == {"n": 1}
     assert (await session.bucket.cursors())["delete"] == {}
@@ -1164,7 +1256,7 @@ async def test_update_with_a_limit(session, bucket):
         async for batch in cursor.batches():
             sizes.append(len(batch))
     assert sizes == [2, 1]
-    assert cursor.limit_reached
+    assert cursor.closed
     async with session.bucket.query(bucket, {"seen": True}) as cursor:
         assert len(cursor.batch) == 3
 
@@ -1228,10 +1320,18 @@ async def test_update_batches(session, bucket):
         bucket, {}, {"$set": {"seen": True}}, batch=2
     ) as cursor:
         async for batch in cursor.batches():
-            if not batch:
-                break
             updated.extend(batch)
     assert sorted(updated) == sorted(ids)
+    assert cursor.closed
+
+
+@pytest.mark.integration
+async def test_an_update_ends_with_the_result_set(session, bucket):
+    await session.bucket.insert(bucket, {"n": 1}, {"n": 2})
+    async with session.bucket.update(bucket, {}, {"$set": {"seen": True}}) as cursor:
+        assert len(cursor.batch) == 2
+        assert cursor.cursor_id == -1
+    assert (await session.bucket.cursors())["update"] == {}
 
 
 @pytest.mark.integration
@@ -1244,8 +1344,10 @@ async def test_update_is_awaitable_and_a_context_manager(session, bucket):
 
 @pytest.mark.integration
 async def test_the_update_cursor_id_holds_without_a_limit(session, bucket):
-    await session.bucket.insert(bucket, {"n": 1})
-    async with session.bucket.update(bucket, {}, {"$set": {"seen": True}}) as cursor:
+    await session.bucket.insert(bucket, {"n": 1}, {"n": 2}, {"n": 3})
+    async with session.bucket.update(
+        bucket, {}, {"$set": {"seen": True}}, batch=1
+    ) as cursor:
         cursor_id = cursor.cursor_id
         await cursor.advance()
         assert cursor.cursor_id == cursor_id
@@ -1253,31 +1355,36 @@ async def test_the_update_cursor_id_holds_without_a_limit(session, bucket):
 
 @pytest.mark.integration
 async def test_update_close(session, bucket):
-    cursor = await session.bucket.update(bucket, {}, {"$set": {"seen": True}})
+    await session.bucket.insert(bucket, {"n": 1}, {"n": 2})
+    cursor = await session.bucket.update(bucket, {}, {"$set": {"seen": True}}, batch=1)
+    cursor_id = cursor.cursor_id
     await cursor.close()
-    with pytest.raises(ResponseError):
-        await session.bucket.advance(cursor.cursor_id, "update")
+    with pytest.raises(ResponseError, match="No such cursor"):
+        await session.bucket.advance(cursor_id, "update")
 
 
 @pytest.mark.integration
 async def test_update_close_twice_on_the_cursor(session, bucket):
-    cursor = await session.bucket.update(bucket, {}, {"$set": {"seen": True}})
+    await session.bucket.insert(bucket, {"n": 1}, {"n": 2})
+    cursor = await session.bucket.update(bucket, {}, {"$set": {"seen": True}}, batch=1)
     await cursor.close()
     await cursor.close()
 
 
 @pytest.mark.integration
 async def test_update_close_twice_on_the_group(session, bucket):
-    cursor = await session.bucket.update(bucket, {}, {"$set": {"seen": True}})
+    await session.bucket.insert(bucket, {"n": 1}, {"n": 2})
+    cursor = await session.bucket.update(bucket, {}, {"$set": {"seen": True}}, batch=1)
     assert await session.bucket.close(cursor.cursor_id, "update") is True
-    with pytest.raises(ResponseError):
+    with pytest.raises(ResponseError, match="No such cursor"):
         await session.bucket.close(cursor.cursor_id, "update")
 
 
 @pytest.mark.integration
 async def test_an_update_cursor_shows_up_in_cursors(session, bucket):
+    await session.bucket.insert(bucket, {"n": 1}, {"n": 1})
     async with session.bucket.update(
-        bucket, {"n": 1}, {"$set": {"seen": True}}
+        bucket, {"n": 1}, {"$set": {"seen": True}}, batch=1
     ) as cursor:
         cursors = await session.bucket.cursors()
         assert cursors["update"][cursor.cursor_id] == {"n": 1}
@@ -1335,9 +1442,8 @@ async def test_batches(session, bucket):
     async with session.bucket.query(bucket, {}, batch=2) as cursor:
         async for batch in cursor.batches():
             sizes.append(len(batch))
-            if len(sizes) == 3:
-                break
-    assert sizes == [2, 1, 0]
+    assert sizes == [2, 1]
+    assert cursor.closed
 
 
 @pytest.mark.integration
@@ -1350,10 +1456,10 @@ async def test_query_is_awaitable_and_a_context_manager(session, bucket):
 
 @pytest.mark.integration
 async def test_the_cursor_id_holds_without_a_limit(session, bucket):
-    """Every reply echoes the same id until ``limit`` is reached, which is
-    why ``advance`` needs no id."""
-    await session.bucket.insert(bucket, {"n": 1})
-    async with session.bucket.query(bucket, {}) as cursor:
+    """Every reply echoes the same id until the last one, so ``advance``
+    needs no id."""
+    await session.bucket.insert(bucket, {"n": 1}, {"n": 2}, {"n": 3})
+    async with session.bucket.query(bucket, {}, batch=1) as cursor:
         cursor_id = cursor.cursor_id
         await cursor.advance()
         assert cursor.cursor_id == cursor_id
@@ -1371,16 +1477,20 @@ async def test_group_advance_returns_the_record(session, bucket):
 
 @pytest.mark.integration
 async def test_close(session, bucket):
-    cursor = await session.bucket.query(bucket, {})
+    await session.bucket.insert(bucket, {"n": 1}, {"n": 2})
+    cursor = await session.bucket.query(bucket, {}, batch=1)
+    cursor_id = cursor.cursor_id
     await cursor.close()
-    with pytest.raises(ResponseError):
-        await session.bucket.advance(cursor.cursor_id)
+    assert cursor.closed
+    with pytest.raises(ResponseError, match="No such cursor"):
+        await session.bucket.advance(cursor_id)
 
 
 @pytest.mark.integration
 async def test_close_twice_on_the_cursor(session, bucket):
     """The cursor holds a flag, so the second call sends nothing."""
-    cursor = await session.bucket.query(bucket, {})
+    await session.bucket.insert(bucket, {"n": 1}, {"n": 2})
+    cursor = await session.bucket.query(bucket, {}, batch=1)
     await cursor.close()
     await cursor.close()
 
@@ -1391,24 +1501,27 @@ async def test_cursor_close_failure_does_not_mask_the_original_error(
 ):
     async with kr.session() as s:
         await s.ping()
+        await s.bucket.insert(bucket, {"n": 1}, {"n": 2})
         conn = s._redis.connection
         with pytest.raises(redis.TimeoutError):
-            async with await s.bucket.query(bucket, {}) as cursor:
+            async with await s.bucket.query(bucket, {}, batch=1) as cursor:
                 conn.read_response = timeout_once(conn)
                 await cursor.advance()
 
 
 @pytest.mark.integration
 async def test_close_twice_on_the_group(session, bucket):
-    cursor = await session.bucket.query(bucket, {})
+    await session.bucket.insert(bucket, {"n": 1}, {"n": 2})
+    cursor = await session.bucket.query(bucket, {}, batch=1)
     assert await session.bucket.close(cursor.cursor_id) is True
-    with pytest.raises(ResponseError):
+    with pytest.raises(ResponseError, match="No such cursor"):
         await session.bucket.close(cursor.cursor_id)
 
 
 @pytest.mark.integration
 async def test_cursors(session, bucket):
-    async with session.bucket.query(bucket, {"n": 1}) as cursor:
+    await session.bucket.insert(bucket, {"n": 1}, {"n": 1})
+    async with session.bucket.query(bucket, {"n": 1}, batch=1) as cursor:
         cursors = await session.bucket.cursors()
         assert cursors["query"][cursor.cursor_id] == {"n": 1}
         assert cursors["update"] == {}
@@ -1418,7 +1531,8 @@ async def test_cursors(session, bucket):
 
 @pytest.mark.integration
 async def test_cursors_for_one_operation(session, bucket):
-    async with session.bucket.query(bucket, {}) as cursor:
+    await session.bucket.insert(bucket, {"n": 1}, {"n": 2})
+    async with session.bucket.query(bucket, {}, batch=1) as cursor:
         cursors = await session.bucket.cursors("query")
         assert list(cursors) == ["query"]
         assert cursor.cursor_id in cursors["query"]

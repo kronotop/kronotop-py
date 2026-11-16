@@ -17,9 +17,10 @@
 The query is a mapping. Results arrive in batches through a cursor, and
 ``batches()`` sends ``BUCKET.ADVANCE`` for each batch after the first.
 
-An empty batch does not mean the cursor is done, so ``batches()`` never ends on
-its own. This example stops on the first empty batch, which is enough for a
-small bucket.
+``batches()`` stops after the batch that carries cursor id ``-1``. The server
+has dropped the cursor by then, so the ``with`` block has nothing to close.
+A cursor you stop reading early stays open, and leaving the ``with`` block
+sends ``BUCKET.CLOSE``.
 
 Run with ``uv run examples/bucket_query.py``.
 """
@@ -53,15 +54,24 @@ async def main() -> None:
             print("cursor  :", cursor.cursor_id)
             # The first turn is the batch already in hand.
             async for batch in cursor.batches():
-                if not batch:
-                    break
                 print("batch   :", batch)
 
-            # The cursor is still open here, so the session lists it.
-            print("cursors :", await session.bucket.cursors("query"))
+            # The last reply carried cursor id -1.
+            print("closed  :", cursor.closed, cursor.cursor_id)
 
-        # Leaving the block sent BUCKET.CLOSE.
+        # The server dropped the cursor, so the session lists none.
         print("cursors :", await session.bucket.cursors("query"))
+
+        # Stop early. The first batch is full, so the cursor stays open on the
+        # server, and leaving the block sends BUCKET.CLOSE.
+        async with session.bucket.query(BUCKET, {}, batch=1) as cursor:
+            print("first   :", cursor.batch)
+            print("open    :", await session.bucket.cursors("query"))
+        print("cursors :", await session.bucket.cursors("query"))
+
+        # ``remove`` marks the bucket, ``purge`` deletes its data.
+        await session.bucket.remove(BUCKET)
+        await session.bucket.purge(BUCKET)
 
 
 if __name__ == "__main__":

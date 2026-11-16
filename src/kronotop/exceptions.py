@@ -28,6 +28,7 @@ __all__ = [
     "BucketAlreadyExistsError",
     "BucketBeingRemovedError",
     "ConfigurationError",
+    "CursorClosedError",
     "DuplicateKeyError",
     "IndexTypeMismatchError",
     "KronotopCommandError",
@@ -67,6 +68,15 @@ class ConfigurationError(KronotopError, ValueError):
     A bad :class:`kronotop.KronotopConfig` field, or a client keyword argument
     Kronotop cannot honour. Also a ``ValueError``, because that is what a
     caller passing a bad value expects to catch.
+    """
+
+
+class CursorClosedError(KronotopError):
+    """Raised by ``advance`` on a cursor that is closed, before any command goes out.
+
+    The server drops a cursor after its last batch, the one that carries
+    cursor id ``-1``, and :meth:`~kronotop.Cursor.close` drops it from the
+    client side.
     """
 
 
