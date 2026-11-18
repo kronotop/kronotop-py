@@ -35,7 +35,7 @@ jobs:
           enable-cache: true
           python-version: ${{ matrix.python-version }}
       - run: uv sync --all-extras --all-packages
-      - run: uv run pytest -v
+      - run: uv run pytest -v -m "not integration"
 
   # The floors in pyproject.toml are a claim. This job tests it, so the claim
   # cannot rot unnoticed. lowest-direct pins every direct dependency to the
@@ -49,7 +49,7 @@ jobs:
           enable-cache: true
           python-version: "3.10"
       - run: uv sync --all-extras --all-packages --resolution lowest-direct
-      - run: uv run pytest -v
+      - run: uv run pytest -v -m "not integration"
       - run: uv run mypy
 
   integration:
