@@ -1,6 +1,6 @@
 [project]
 name = "mem0-kronotop"
-version = "0.1.0"
+version = "0.2.0"
 description = "Kronotop backend for mem0"
 readme = "README.md"
 license = "Apache-2.0"
@@ -21,7 +21,7 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
-    "kronotop-py>=0.1.0",
+    "kronotop-py>=0.2.0",
     "mem0ai>=2.2.0",
 ]
 

@@ -1,6 +1,6 @@
 [project]
 name = "kronotop-py"
-version = "0.1.0"
+version = "0.2.0"
 description = "Python client for Kronotop"
 readme = "README.md"
 license = "Apache-2.0"
